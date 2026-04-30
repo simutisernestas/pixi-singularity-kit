@@ -2,7 +2,7 @@ Bootstrap: docker
 From: ubuntu:24.04
 
 %labels
-    Author OpenCode
+    Author ernie
     Description reusable pixi-backed Apptainer image for baked envs and optional host editable package
 
 %files
