@@ -4,3 +4,4 @@ __pycache__/
 *.sif
 test/package/*.sif
 test/experiment/*.sif
+install.log
