@@ -1,0 +1,68 @@
+Bootstrap: docker
+From: ubuntu:24.04
+
+%labels
+    Author OpenCode
+    Description reusable pixi-backed Apptainer image for baked envs and optional host editable package
+
+%files
+    __BUNDLE_TAR__ /opt/pixi-bundle.tar.gz
+    __RUNSCRIPT__ /opt/run_pixi_container.sh
+    __VALIDATOR__ /opt/validate_pixi_container.sh
+
+%environment
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+    export PYTHONUNBUFFERED=1
+    export PIXI_HOME=/opt/pixi
+    export PIXI_BAKED_PROJECT=/opt/pixi-project
+    export PIXI_CONTAINER_ROOT=/opt/pixi-bundle
+    export PATH=/usr/local/bin:$PATH
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    export PIXI_HOME=/opt/pixi
+
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        curl \
+        tar
+    rm -rf /var/lib/apt/lists/*
+
+    curl -fsSL https://pixi.sh/install.sh | PIXI_HOME=/opt/pixi PIXI_BIN_DIR=/usr/local/bin PIXI_NO_PATH_UPDATE=1 bash
+
+    mkdir -p /opt/pixi-bundle /opt/pixi-project
+    tar -xzf /opt/pixi-bundle.tar.gz -C /opt/pixi-bundle
+
+    . /opt/pixi-bundle/.pixi-container/metadata.env
+    manifest_path="/opt/pixi-bundle/${MANIFEST_REL}"
+    project_dir=$(dirname "$manifest_path")
+    rm -rf /opt/pixi-project
+    ln -s "$project_dir" /opt/pixi-project
+
+    while IFS= read -r env_name; do
+        [ -n "$env_name" ] || continue
+        if [ "$USE_FROZEN" = "1" ]; then
+            pixi install --manifest-path "$manifest_path" --environment "$env_name" --frozen
+        else
+            pixi install --manifest-path "$manifest_path" --environment "$env_name"
+        fi
+    done < /opt/pixi-bundle/.pixi-container/expected-envs.txt
+
+    env_root="/opt/pixi-project/.pixi/envs"
+    test -d "$env_root"
+    for env_dir in "$env_root"/*; do
+        test -d "$env_dir"
+        "$env_dir/bin/python" --version
+    done
+
+    chmod 0755 /opt/run_pixi_container.sh /opt/validate_pixi_container.sh
+
+%runscript
+    exec /opt/run_pixi_container.sh "$@"
+
+%test
+    /opt/validate_pixi_container.sh
