@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .DS_Store
 *.sif
+test/package/*.sif
+test/experiment/*.sif
