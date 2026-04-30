@@ -21,10 +21,10 @@ jobs:
 
       - name: Validate scripts
         run: |
-          python3 -m py_compile pixi-container-build
+          python3 -m py_compile src/pixi-container-build.py
           bash -n install.sh
-          bash -n run_pixi_container.sh
-          bash -n validate_pixi_container.sh
+          bash -n src/run_pixi_container.sh
+          bash -n src/validate_pixi_container.sh
           bash -n test/run-smoke-tests.sh
 
       - name: Run smoke builds

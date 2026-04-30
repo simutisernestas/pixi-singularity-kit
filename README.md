@@ -7,11 +7,11 @@ Reusable Apptainer/Singularity build kit for two cases:
 
 Files:
 
-- `bin/pixi-container-build` - executable host-side build command for `PATH`
-- `pixi-container-build` - implementation resolved by `bin/pixi-container-build`
-- `pixi-container.def` - generic Apptainer recipe template
-- `run_pixi_container.sh` - runtime wrapper inside image
-- `validate_pixi_container.sh` - image self-test
+- `src/bin/pixi-container-build` - executable host-side build command for `PATH`
+- `src/pixi-container-build.py` - implementation resolved by `src/bin/pixi-container-build`
+- `src/pixi-container.def` - generic Apptainer recipe template
+- `src/run_pixi_container.sh` - runtime wrapper inside image
+- `src/validate_pixi_container.sh` - image self-test
 - `install.sh` - installs kit usage files into `/opt/pixi-singularity-kit`
 - `test/run-smoke-tests.sh` - smoke runner that builds both sample `.sif` files
 

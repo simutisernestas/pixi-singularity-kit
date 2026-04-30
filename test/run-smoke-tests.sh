@@ -9,7 +9,7 @@ set -euo pipefail
 # What it does:
 #   - builds package-dev sample image at `test/package/package-dev.sif`
 #   - builds pixi-project sample image at `test/experiment/experiment-pixi.sif`
-#   - uses kit-local `bin/pixi-container-build`
+#   - uses kit-local `src/bin/pixi-container-build`
 #
 # Notes:
 #   - builder uses `limactl` by default on macOS and local `apptainer` on Linux CI
@@ -17,7 +17,9 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 kit_root="$(cd -- "$script_dir/.." && pwd)"
-builder="$kit_root/bin/pixi-container-build"
+builder="$kit_root/src/bin/pixi-container-build"
+package_image="$kit_root/test/package/package-dev.sif"
+experiment_image="$kit_root/test/experiment/experiment-pixi.sif"
 lima_instance="apptainer-x86"
 backend="auto"
 
@@ -44,8 +46,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-"$builder" --backend "$backend" --lima-instance "$lima_instance" --output "$kit_root/test/package/package-dev.sif" --manifest "$kit_root/test/package/pyproject.toml"
-"$builder" --backend "$backend" --lima-instance "$lima_instance" --mode pixi-project --output "$kit_root/test/experiment/experiment-pixi.sif" --manifest "$kit_root/test/experiment/pixi.toml"
+rm -f "$package_image" "$experiment_image"
 
-echo "built=$kit_root/test/package/package-dev.sif"
-echo "built=$kit_root/test/experiment/experiment-pixi.sif"
+"$builder" --backend "$backend" --lima-instance "$lima_instance" --output "$package_image" --manifest "$kit_root/test/package/pyproject.toml"
+"$builder" --backend "$backend" --lima-instance "$lima_instance" --mode pixi-project --output "$experiment_image" --manifest "$kit_root/test/experiment/pixi.toml"
+
+echo "built=$package_image"
+echo "built=$experiment_image"
