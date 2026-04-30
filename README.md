@@ -20,6 +20,7 @@ Common usage:
 ```bash
 export PATH="/opt/pixi-singularity-kit/bin:$PATH"
 pixi-container-build
+pixi-container-build --backend local
 pixi-container-build --env default --env format
 pixi-container-build --mode pixi-project --output /tmp/my-job.sif
 ```
@@ -43,6 +44,7 @@ Smoke tests:
 
 ```bash
 ./test/run-smoke-tests.sh
+./test/run-smoke-tests.sh --backend local
 ./test/run-smoke-tests.sh --lima-instance apptainer-x86
 ```
 
@@ -50,7 +52,8 @@ Notes:
 
 - default build mode is auto-detect from current directory or nearest parent with manifest
 - if no `--env` is passed, all pixi environments are baked
-- builder uses `limactl start`, `limactl copy`, `limactl shell`, and guest-local `/tmp` build paths only
+- builder uses `limactl start`, `limactl copy`, `limactl shell`, and guest-local `/tmp` build paths on macOS by default
+- builder can use local `apptainer` directly with `--backend local`, which is how CI smoke tests run
 - Pixi Singularity Kit is self-sufficient inside `container/pixi-container-kit/`; pixwake source is not used by kit itself
 - sample fixtures live in `test/package/` and `test/experiment/`
 - smoke runner generates `test/package/package-dev.sif` and `test/experiment/experiment-pixi.sif`

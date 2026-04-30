@@ -1,0 +1,33 @@
+name: Smoke Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install apptainer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget squashfs-tools uidmap fuse2fs fakeroot fuse-overlayfs libseccomp-dev cryptsetup-bin runc
+          wget -q https://github.com/apptainer/apptainer/releases/download/v1.2.5/apptainer_1.2.5_amd64.deb
+          wget -q https://github.com/apptainer/apptainer/releases/download/v1.2.5/apptainer-suid_1.2.5_amd64.deb
+          sudo apt-get install -y ./apptainer_1.2.5_amd64.deb ./apptainer-suid_1.2.5_amd64.deb
+          apptainer --version
+
+      - name: Validate scripts
+        working-directory: container/pixi-container-kit
+        run: |
+          python3 -m py_compile pixi-container-build
+          bash -n install.sh
+          bash -n run_pixi_container.sh
+          bash -n validate_pixi_container.sh
+          bash -n test/run-smoke-tests.sh
+
+      - name: Run smoke builds
+        working-directory: container/pixi-container-kit
+        run: ./test/run-smoke-tests.sh --backend local

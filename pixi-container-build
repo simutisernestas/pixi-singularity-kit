@@ -14,7 +14,8 @@ Behavior:
   - `pixi-project` mode bakes pixi environments for running host scripts/experiments.
   - `--env` may be passed multiple times or as comma-separated names.
     If omitted, all pixi environments are baked.
-  - Uses `limactl` and guest-local `/tmp` staging, matching `container/CONTAINER-DEV.md`.
+  - Uses `limactl` and guest-local `/tmp` staging by default on macOS.
+  - Can use local `apptainer` directly on Linux for CI.
   - Output defaults to `<project>-dev.sif` or `<project>-pixi.sif` in current directory.
   - Keep only `bin/` on `PATH`; wrapper resolves sibling files inside this kit.
 """
@@ -79,6 +80,12 @@ def parse_args() -> argparse.Namespace:
         "--lima-instance",
         default="apptainer-x86",
         help="Lima instance name used for build/test. Default: apptainer-x86.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=["auto", "lima", "local"],
+        default="auto",
+        help="Build backend. Default: auto.",
     )
     parser.add_argument(
         "--keep-build-dir",
@@ -310,6 +317,11 @@ def run_host_command(command: list[str]) -> None:
     subprocess.run(command, check=True)
 
 
+def ensure_local_apptainer_available() -> None:
+    if shutil.which("apptainer") is None:
+        raise SystemExit("could not find `apptainer` in PATH for local backend")
+
+
 def run_guest_command(instance: str, command: list[str]) -> None:
     subprocess.run(["limactl", "shell", instance, *command], check=True)
 
@@ -327,6 +339,18 @@ def copy_from_guest(instance: str, guest_path: str, local_path: Path) -> None:
 
 def ensure_lima_started(instance: str) -> None:
     run_host_command(["limactl", "start", instance])
+
+
+def detect_backend(name: str) -> str:
+    if name != "auto":
+        return name
+    if os.uname().sysname == "Darwin":
+        return "lima"
+    if shutil.which("apptainer") is not None:
+        return "local"
+    if shutil.which("limactl") is not None:
+        return "lima"
+    raise SystemExit("could not auto-detect backend: need `apptainer` or `limactl`")
 
 
 def write_metadata(staging_root: Path, manifest_rel: Path, mode: str, source_manifest_name: str, use_frozen: bool) -> None:
@@ -424,6 +448,19 @@ def stage_guest_inputs(instance: str, script_dir: Path, build_root: Path) -> tup
     return guest_root, guest_recipe, f"{guest_root}/image.sif"
 
 
+def build_local_image(script_dir: Path, build_root: Path, output_path: Path) -> None:
+    recipe_path = build_root / "pixi-container.def"
+    render_definition(
+        script_dir / "pixi-container.def",
+        build_root / "pixi-bundle.tar.gz",
+        script_dir / "run_pixi_container.sh",
+        script_dir / "validate_pixi_container.sh",
+        recipe_path,
+    )
+    run_host_command(["apptainer", "build", str(output_path), str(recipe_path)])
+    run_host_command(["apptainer", "test", str(output_path)])
+
+
 def main() -> int:
     args = parse_args()
     script_dir = Path(__file__).resolve().parent
@@ -448,7 +485,11 @@ def main() -> int:
     selected_envs = normalize_selected_envs(args.env, available_envs)
     output_path = build_output_path(args, project_name, mode)
 
-    ensure_limactl_available()
+    backend = detect_backend(args.backend)
+    if backend == "lima":
+        ensure_limactl_available()
+    else:
+        ensure_local_apptainer_available()
 
     tmpdir_obj: tempfile.TemporaryDirectory[str] | None = None
     if args.keep_build_dir:
@@ -461,27 +502,29 @@ def main() -> int:
     stage_bundle(mode, manifest_path, manifest_copy, selected_envs, build_root / "pixi-bundle.tar.gz")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    ensure_lima_started(args.lima_instance)
-    guest_root, guest_recipe, guest_image = stage_guest_inputs(args.lima_instance, script_dir, build_root)
 
     print(f"mode={mode}")
     print(f"manifest={manifest_path}")
     print(f"envs={','.join(selected_envs)}")
+    print(f"backend={backend}")
     print(f"lima_instance={args.lima_instance}")
     print(f"output={output_path}")
     print(f"build_root={build_root}")
-    print(f"guest_root={guest_root}")
+    if backend == "lima":
+        ensure_lima_started(args.lima_instance)
+        guest_root, guest_recipe, guest_image = stage_guest_inputs(args.lima_instance, script_dir, build_root)
+        print(f"guest_root={guest_root}")
+        run_guest_command(args.lima_instance, ["rm", "-f", guest_image])
+        run_guest_command(args.lima_instance, ["sudo", "apptainer", "build", guest_image, guest_recipe])
+        run_guest_command(args.lima_instance, ["apptainer", "test", guest_image])
+        if output_path.exists():
+            output_path.unlink()
+        copy_from_guest(args.lima_instance, guest_image, output_path)
+        if not args.keep_guest_dir:
+            run_guest_command(args.lima_instance, ["rm", "-rf", guest_root])
+    else:
+        build_local_image(script_dir, build_root, output_path)
 
-    run_guest_command(args.lima_instance, ["rm", "-f", guest_image])
-    run_guest_command(args.lima_instance, ["sudo", "apptainer", "build", guest_image, guest_recipe])
-    run_guest_command(args.lima_instance, ["apptainer", "test", guest_image])
-
-    if output_path.exists():
-        output_path.unlink()
-    copy_from_guest(args.lima_instance, guest_image, output_path)
-
-    if not args.keep_guest_dir:
-        run_guest_command(args.lima_instance, ["rm", "-rf", guest_root])
     if tmpdir_obj is not None:
         tmpdir_obj.cleanup()
     return 0
