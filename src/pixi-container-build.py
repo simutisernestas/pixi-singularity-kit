@@ -97,6 +97,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep guest /tmp build directory for debugging.",
     )
+    parser.add_argument(
+        "--host-local-path-deps",
+        action="store_true",
+        help="Do not bake local path pypi-dependencies; load them from the host at runtime via PYTHONPATH.",
+    )
     return parser.parse_args()
 
 
@@ -238,6 +243,18 @@ def add_build_requirements(sanitized: dict, manifest_path: Path) -> None:
             pypi_dependencies[match.group(1)] = version_spec or "*"
 
 
+def strip_local_path_dependencies(sanitized: dict, workspace_root: Path, skip_workspace_root: bool) -> None:
+    for table in iter_pypi_dependency_tables(sanitized):
+        for name, spec in list(table.items()):
+            if not isinstance(spec, dict) or "path" not in spec:
+                continue
+            dep_path = Path(spec["path"])
+            resolved = (workspace_root / dep_path).resolve() if not dep_path.is_absolute() else dep_path.resolve()
+            if skip_workspace_root and resolved == workspace_root:
+                continue
+            del table[name]
+
+
 def strip_self_path_dependencies(sanitized: dict, workspace_root: Path) -> None:
     for table in iter_pypi_dependency_tables(sanitized):
         for name, spec in list(table.items()):
@@ -290,12 +307,16 @@ def write_toml(node: dict, output_path: Path) -> None:
     output_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
-def build_manifest_copy(mode: str, manifest_path: Path, build_root: Path) -> Path:
-    if mode != "package-dev":
+def build_manifest_copy(mode: str, manifest_path: Path, build_root: Path, host_local_path_deps: bool) -> Path:
+    if mode != "package-dev" and not host_local_path_deps:
         return manifest_path
     sanitized = copy.deepcopy(load_toml(manifest_path))
-    strip_self_path_dependencies(sanitized, manifest_path.parent.resolve())
-    add_build_requirements(sanitized, manifest_path)
+    workspace_root = manifest_path.parent.resolve()
+    if host_local_path_deps:
+        strip_local_path_dependencies(sanitized, workspace_root, skip_workspace_root=mode == "package-dev")
+    if mode == "package-dev":
+        strip_self_path_dependencies(sanitized, workspace_root)
+        add_build_requirements(sanitized, manifest_path)
     temp_manifest = build_root / manifest_path.name
     write_toml(sanitized, temp_manifest)
     return temp_manifest
@@ -353,7 +374,14 @@ def detect_backend(name: str) -> str:
     raise SystemExit("could not auto-detect backend: need `apptainer` or `limactl`")
 
 
-def write_metadata(staging_root: Path, manifest_rel: Path, mode: str, source_manifest_name: str, use_frozen: bool) -> None:
+def write_metadata(
+    staging_root: Path,
+    manifest_rel: Path,
+    mode: str,
+    source_manifest_name: str,
+    use_frozen: bool,
+    host_local_path_deps: bool,
+) -> None:
     meta_dir = staging_root / ".pixi-container"
     meta_dir.mkdir(parents=True, exist_ok=True)
     project_package_name = ""
@@ -367,6 +395,7 @@ def write_metadata(staging_root: Path, manifest_rel: Path, mode: str, source_man
         f"SOURCE_MANIFEST_NAME={shlex.quote(source_manifest_name)}",
         f"PROJECT_PACKAGE_NAME={shlex.quote(project_package_name)}",
         f"USE_FROZEN={shlex.quote('1' if use_frozen else '0')}",
+        f"HOST_LOCAL_PATH_DEPS={shlex.quote('1' if host_local_path_deps else '0')}",
     ]
     (meta_dir / "metadata.env").write_text("\n".join(metadata_lines) + "\n", encoding="utf-8")
 
@@ -377,16 +406,18 @@ def stage_bundle(
     manifest_copy: Path,
     selected_envs: list[str],
     output_bundle: Path,
+    host_local_path_deps: bool,
 ) -> None:
     workspace_root = manifest_path.parent.resolve()
     local_roots = collect_local_path_roots(manifest_path, skip_workspace_root=mode == "package-dev")
-    selected_paths = [*local_roots]
+    host_local_paths = [os.path.relpath(path, workspace_root) for path in local_roots] if host_local_path_deps else []
+    selected_paths = [] if host_local_path_deps else [*local_roots]
     lock_path = workspace_root / "pixi.lock"
     if lock_path.exists() and mode != "package-dev":
         selected_paths.append(lock_path)
     selected_paths = normalize_paths(selected_paths)
     common_root = workspace_root.parent if mode == "package-dev" else Path(
-        os.path.commonpath([str(path.resolve()) for path in [manifest_path, *selected_paths]])
+        os.path.commonpath([str(path.resolve()) for path in [workspace_root, *selected_paths]])
     )
 
     with tempfile.TemporaryDirectory(prefix="pixi-bundle-") as tmpdir:
@@ -405,9 +436,14 @@ def stage_bundle(
             mode,
             manifest_path.name,
             use_frozen=mode == "pixi-project" and lock_path.exists(),
+            host_local_path_deps=host_local_path_deps,
         )
         (staging_root / ".pixi-container" / "expected-envs.txt").write_text(
             "\n".join(selected_envs) + "\n",
+            encoding="utf-8",
+        )
+        (staging_root / ".pixi-container" / "host-local-paths.txt").write_text(
+            "\n".join(host_local_paths) + ("\n" if host_local_paths else ""),
             encoding="utf-8",
         )
 
@@ -498,8 +534,15 @@ def main() -> int:
         tmpdir_obj = tempfile.TemporaryDirectory(prefix="pixi-container-build-")
         build_root = Path(tmpdir_obj.name)
 
-    manifest_copy = build_manifest_copy(mode, manifest_path, build_root)
-    stage_bundle(mode, manifest_path, manifest_copy, selected_envs, build_root / "pixi-bundle.tar.gz")
+    manifest_copy = build_manifest_copy(mode, manifest_path, build_root, args.host_local_path_deps)
+    stage_bundle(
+        mode,
+        manifest_path,
+        manifest_copy,
+        selected_envs,
+        build_root / "pixi-bundle.tar.gz",
+        args.host_local_path_deps,
+    )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -507,6 +550,7 @@ def main() -> int:
     print(f"manifest={manifest_path}")
     print(f"envs={','.join(selected_envs)}")
     print(f"backend={backend}")
+    print(f"host_local_path_deps={int(args.host_local_path_deps)}")
     print(f"lima_instance={args.lima_instance}")
     print(f"output={output_path}")
     print(f"build_root={build_root}")

@@ -23,6 +23,7 @@ pixi-container-build
 pixi-container-build --backend local
 pixi-container-build --env default --env format
 pixi-container-build --mode pixi-project --output /tmp/my-job.sif
+pixi-container-build --mode pixi-project --host-local-path-deps --output /tmp/my-job.sif
 ```
 
 Install to `/opt`:
@@ -52,6 +53,8 @@ Notes:
 
 - default build mode is auto-detect from current directory or nearest parent with manifest
 - if no `--env` is passed, all pixi environments are baked
+- `--host-local-path-deps` keeps local `pypi-dependencies` path sources on the host and injects them at runtime through `PYTHONPATH`
+- host-local path deps are Python-source only; compiled extensions, console scripts, package metadata, and transitive deps from removed local packages are not baked
 - builder uses `limactl start`, `limactl copy`, `limactl shell`, and guest-local `/tmp` build paths on macOS by default
 - builder can use local `apptainer` directly with `--backend local`, which is how CI smoke tests run
 - sample fixtures live in `test/package/` and `test/experiment/`

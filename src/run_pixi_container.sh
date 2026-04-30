@@ -25,6 +25,7 @@ Behavior:
   - `--pixi-env` defaults to `default`.
   - `script.py` and `python ...` use baked interpreter from selected env.
   - `package-dev` mode imports host package through `PYTHONPATH` only.
+  - host-local path deps import host source through `PYTHONPATH` only.
   - `$PWD` and optional `$PWD/src` are prepended to `PYTHONPATH`.
 EOF
 }
@@ -61,6 +62,29 @@ search_up_for_manifest() {
     return 1
 }
 
+prepend_python_path() {
+    local path="$1"
+    if [[ -d "$path" ]]; then
+        export PYTHONPATH="$path${PYTHONPATH:+:$PYTHONPATH}"
+    fi
+}
+
+prepend_host_source_path() {
+    local source_path="$1"
+    prepend_python_path "$source_path"
+    prepend_python_path "$source_path/src"
+}
+
+apply_host_local_path_deps() {
+    local paths_file="$container_root/.pixi-container/host-local-paths.txt"
+    local rel_path
+    [[ -f "$paths_file" ]] || return 0
+    while IFS= read -r rel_path; do
+        [[ -n "$rel_path" ]] || continue
+        prepend_host_source_path "$host_project/$rel_path"
+    done < "$paths_file"
+}
+
 container_image_dir() {
     local image_path="${APPTAINER_CONTAINER:-${SINGULARITY_CONTAINER:-}}"
     if [[ -n "$image_path" ]]; then
@@ -88,7 +112,7 @@ resolve_host_project() {
     fi
 
     cat >&2 <<EOF
-Cannot locate host project for package-dev mode.
+Cannot locate host project for runtime host source paths.
 Run from project root or subdir, place image next to project, or pass --project /path/to/project.
 Expected manifest: $SOURCE_MANIFEST_NAME
 EOF
@@ -137,7 +161,7 @@ if [[ $# -eq 0 ]]; then
     exit 2
 fi
 
-if [[ "$MODE" == "package-dev" ]]; then
+if [[ "$MODE" == "package-dev" || "${HOST_LOCAL_PATH_DEPS:-0}" == "1" ]]; then
     host_project="$(resolve_host_project)"
 fi
 
@@ -148,15 +172,14 @@ export PIXI_ENV="$env_name"
 if [[ "$MODE" == "package-dev" ]]; then
     export PIXI_HOST_PROJECT="$host_project"
     export PIXI_CONTAINER_RUNTIME_MODE="package-dev-pythonpath"
-    if [[ -d "$host_project/src" ]]; then
-        export PYTHONPATH="$host_project/src${PYTHONPATH:+:$PYTHONPATH}"
-    fi
-    export PYTHONPATH="$host_project${PYTHONPATH:+:$PYTHONPATH}"
+    prepend_host_source_path "$host_project"
+    apply_host_local_path_deps
+elif [[ "${HOST_LOCAL_PATH_DEPS:-0}" == "1" ]]; then
+    export PIXI_HOST_PROJECT="$host_project"
+    export PIXI_CONTAINER_RUNTIME_MODE="pixi-project-host-local-path-deps"
+    apply_host_local_path_deps
 elif [[ -d "$PWD" ]]; then
-    export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
-    if [[ -d "$PWD/src" ]]; then
-        export PYTHONPATH="$PWD/src:$PYTHONPATH"
-    fi
+    prepend_host_source_path "$PWD"
 fi
 
 cmd="$1"

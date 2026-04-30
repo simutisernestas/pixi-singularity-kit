@@ -6,6 +6,9 @@ platforms = ["linux-64"]
 [dependencies]
 python = "<3.15"
 
+[pypi-dependencies]
+experiment-support = { path = "support_pkg", editable = true }
+
 [feature.test.dependencies]
 pytest = "*"
 
