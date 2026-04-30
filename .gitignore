@@ -5,3 +5,4 @@ __pycache__/
 test/package/*.sif
 test/experiment/*.sif
 install.log
+.agent/

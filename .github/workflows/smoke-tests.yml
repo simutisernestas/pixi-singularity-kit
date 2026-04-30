@@ -20,7 +20,6 @@ jobs:
           apptainer --version
 
       - name: Validate scripts
-        working-directory: container/pixi-container-kit
         run: |
           python3 -m py_compile pixi-container-build
           bash -n install.sh
@@ -29,5 +28,4 @@ jobs:
           bash -n test/run-smoke-tests.sh
 
       - name: Run smoke builds
-        working-directory: container/pixi-container-kit
         run: ./test/run-smoke-tests.sh --backend local
