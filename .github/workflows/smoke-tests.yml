@@ -28,4 +28,4 @@ jobs:
           bash -n test/run-smoke-tests.sh
 
       - name: Run smoke builds
-        run: ./test/run-smoke-tests.sh --backend local
+        run: sudo ./test/run-smoke-tests.sh --backend local
