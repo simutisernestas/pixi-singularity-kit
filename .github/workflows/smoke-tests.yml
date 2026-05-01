@@ -12,11 +12,25 @@ jobs:
 
       - name: Install apptainer
         run: |
-          sudo apt-get update
-          sudo apt-get install -y wget squashfs-tools uidmap fuse2fs fakeroot fuse-overlayfs libseccomp-dev cryptsetup-bin runc
+          run_quiet() {
+            label="$1"
+            shift
+            log_file="${RUNNER_TEMP:-/tmp}/${label}.log"
+            echo "running=$label"
+            if "$@" >"$log_file" 2>&1; then
+              echo "ok=$label"
+              return 0
+            fi
+            echo "failed=$label" >&2
+            tail -n 200 "$log_file" >&2
+            return 1
+          }
+
+          run_quiet apt-update sudo apt-get update
+          run_quiet apt-install sudo apt-get install -y wget squashfs-tools uidmap fuse2fs fakeroot fuse-overlayfs libseccomp-dev cryptsetup-bin runc
           wget -q https://github.com/apptainer/apptainer/releases/download/v1.2.5/apptainer_1.2.5_amd64.deb
           wget -q https://github.com/apptainer/apptainer/releases/download/v1.2.5/apptainer-suid_1.2.5_amd64.deb
-          sudo apt-get install -y ./apptainer_1.2.5_amd64.deb ./apptainer-suid_1.2.5_amd64.deb
+          run_quiet apptainer-deb-install sudo apt-get install -y ./apptainer_1.2.5_amd64.deb ./apptainer-suid_1.2.5_amd64.deb
           apptainer --version
 
       - name: Validate scripts

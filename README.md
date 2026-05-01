@@ -58,5 +58,3 @@ Notes:
 - builder uses `limactl start`, `limactl copy`, `limactl shell`, and guest-local `/tmp` build paths on macOS by default
 - builder can use local `apptainer` directly with `--backend local`, which is how CI smoke tests run
 - sample fixtures live in `test/package/` and `test/experiment/`
-- smoke runner generates `test/package/package-dev.sif` and `test/experiment/experiment-pixi.sif`
-- Lima shared mount in this repo was stale for post-build host edits during verification; host file edits were not immediately visible from guest view until copied/synced into guest. Built image behavior itself validated using guest-local copied `.sif`.
