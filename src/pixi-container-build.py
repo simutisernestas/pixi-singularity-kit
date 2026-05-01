@@ -243,18 +243,6 @@ def add_build_requirements(sanitized: dict, manifest_path: Path) -> None:
             pypi_dependencies[match.group(1)] = version_spec or "*"
 
 
-def strip_local_path_dependencies(sanitized: dict, workspace_root: Path, skip_workspace_root: bool) -> None:
-    for table in iter_pypi_dependency_tables(sanitized):
-        for name, spec in list(table.items()):
-            if not isinstance(spec, dict) or "path" not in spec:
-                continue
-            dep_path = Path(spec["path"])
-            resolved = (workspace_root / dep_path).resolve() if not dep_path.is_absolute() else dep_path.resolve()
-            if skip_workspace_root and resolved == workspace_root:
-                continue
-            del table[name]
-
-
 def strip_self_path_dependencies(sanitized: dict, workspace_root: Path) -> None:
     for table in iter_pypi_dependency_tables(sanitized):
         for name, spec in list(table.items()):
@@ -308,12 +296,10 @@ def write_toml(node: dict, output_path: Path) -> None:
 
 
 def build_manifest_copy(mode: str, manifest_path: Path, build_root: Path, host_local_path_deps: bool) -> Path:
-    if mode != "package-dev" and not host_local_path_deps:
+    if mode != "package-dev":
         return manifest_path
     sanitized = copy.deepcopy(load_toml(manifest_path))
     workspace_root = manifest_path.parent.resolve()
-    if host_local_path_deps:
-        strip_local_path_dependencies(sanitized, workspace_root, skip_workspace_root=mode == "package-dev")
     if mode == "package-dev":
         strip_self_path_dependencies(sanitized, workspace_root)
         add_build_requirements(sanitized, manifest_path)
@@ -411,7 +397,7 @@ def stage_bundle(
     workspace_root = manifest_path.parent.resolve()
     local_roots = collect_local_path_roots(manifest_path, skip_workspace_root=mode == "package-dev")
     host_local_paths = [os.path.relpath(path, workspace_root) for path in local_roots] if host_local_path_deps else []
-    selected_paths = [] if host_local_path_deps else [*local_roots]
+    selected_paths = [*local_roots]
     conda_pypi_map = load_pixi_config(manifest_path).get("workspace", {}).get("conda-pypi-map")
     if isinstance(conda_pypi_map, str):
         conda_pypi_map = {"default": conda_pypi_map}
@@ -424,7 +410,7 @@ def stage_bundle(
             if resolved_map.exists():
                 selected_paths.append(resolved_map)
     lock_path = workspace_root / "pixi.lock"
-    if lock_path.exists() and mode != "package-dev" and not host_local_path_deps:
+    if lock_path.exists() and mode != "package-dev":
         selected_paths.append(lock_path)
     selected_paths = normalize_paths(selected_paths)
     common_root = workspace_root.parent if mode == "package-dev" else Path(
@@ -446,7 +432,7 @@ def stage_bundle(
             manifest_rel,
             mode,
             manifest_path.name,
-            use_frozen=mode == "pixi-project" and lock_path.exists() and not host_local_path_deps,
+            use_frozen=mode == "pixi-project" and lock_path.exists(),
             host_local_path_deps=host_local_path_deps,
         )
         (staging_root / ".pixi-container" / "expected-envs.txt").write_text(
