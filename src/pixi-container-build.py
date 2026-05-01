@@ -412,8 +412,19 @@ def stage_bundle(
     local_roots = collect_local_path_roots(manifest_path, skip_workspace_root=mode == "package-dev")
     host_local_paths = [os.path.relpath(path, workspace_root) for path in local_roots] if host_local_path_deps else []
     selected_paths = [] if host_local_path_deps else [*local_roots]
+    conda_pypi_map = load_pixi_config(manifest_path).get("workspace", {}).get("conda-pypi-map")
+    if isinstance(conda_pypi_map, str):
+        conda_pypi_map = {"default": conda_pypi_map}
+    if isinstance(conda_pypi_map, dict):
+        for map_value in conda_pypi_map.values():
+            if not isinstance(map_value, str):
+                continue
+            map_path = Path(map_value)
+            resolved_map = (workspace_root / map_path).resolve() if not map_path.is_absolute() else map_path.resolve()
+            if resolved_map.exists():
+                selected_paths.append(resolved_map)
     lock_path = workspace_root / "pixi.lock"
-    if lock_path.exists() and mode != "package-dev":
+    if lock_path.exists() and mode != "package-dev" and not host_local_path_deps:
         selected_paths.append(lock_path)
     selected_paths = normalize_paths(selected_paths)
     common_root = workspace_root.parent if mode == "package-dev" else Path(
@@ -435,7 +446,7 @@ def stage_bundle(
             manifest_rel,
             mode,
             manifest_path.name,
-            use_frozen=mode == "pixi-project" and lock_path.exists(),
+            use_frozen=mode == "pixi-project" and lock_path.exists() and not host_local_path_deps,
             host_local_path_deps=host_local_path_deps,
         )
         (staging_root / ".pixi-container" / "expected-envs.txt").write_text(
