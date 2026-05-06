@@ -55,6 +55,6 @@ Notes:
 - if no `--env` is passed, all pixi environments are baked
 - `--host-local-path-deps` still stages local path packages during image build so pixi can resolve and install their dependencies, then prepends host source paths at runtime through `PYTHONPATH`
 - host-local path deps still rely on host source at runtime; compiled extensions and console scripts come from baked install, not live host source
-- builder uses `limactl start`, `limactl copy`, `limactl shell`, and guest-local `/tmp` build paths on macOS by default
+- builder uses `limactl start`, `limactl copy`, `limactl shell`, guest-local `/tmp` build paths, and `limactl stop` on macOS by default
 - builder can use local `apptainer` directly with `--backend local`, which is how CI smoke tests run
 - sample fixtures live in `test/package/` and `test/experiment/`

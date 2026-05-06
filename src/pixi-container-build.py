@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 from pathlib import Path
@@ -531,43 +532,55 @@ def main() -> int:
         tmpdir_obj = tempfile.TemporaryDirectory(prefix="pixi-container-build-")
         build_root = Path(tmpdir_obj.name)
 
-    manifest_copy = build_manifest_copy(mode, manifest_path, build_root, args.host_local_path_deps)
-    stage_bundle(
-        mode,
-        manifest_path,
-        manifest_copy,
-        selected_envs,
-        build_root / "pixi-bundle.tar.gz",
-        args.host_local_path_deps,
-    )
+    try:
+        manifest_copy = build_manifest_copy(mode, manifest_path, build_root, args.host_local_path_deps)
+        stage_bundle(
+            mode,
+            manifest_path,
+            manifest_copy,
+            selected_envs,
+            build_root / "pixi-bundle.tar.gz",
+            args.host_local_path_deps,
+        )
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"mode={mode}")
-    print(f"manifest={manifest_path}")
-    print(f"envs={','.join(selected_envs)}")
-    print(f"backend={backend}")
-    print(f"host_local_path_deps={int(args.host_local_path_deps)}")
-    print(f"lima_instance={args.lima_instance}")
-    print(f"output={output_path}")
-    print(f"build_root={build_root}")
-    if backend == "lima":
-        ensure_lima_started(args.lima_instance)
-        guest_root, guest_recipe, guest_image = stage_guest_inputs(args.lima_instance, script_dir, build_root)
-        print(f"guest_root={guest_root}")
-        run_guest_command(args.lima_instance, ["rm", "-f", guest_image])
-        run_guest_command(args.lima_instance, ["sudo", "apptainer", "build", guest_image, guest_recipe])
-        run_guest_command(args.lima_instance, ["apptainer", "test", guest_image])
-        if output_path.exists():
-            output_path.unlink()
-        copy_from_guest(args.lima_instance, guest_image, output_path)
-        if not args.keep_guest_dir:
-            run_guest_command(args.lima_instance, ["rm", "-rf", guest_root])
-    else:
-        build_local_image(script_dir, build_root, output_path)
-
-    if tmpdir_obj is not None:
-        tmpdir_obj.cleanup()
+        print(f"mode={mode}")
+        print(f"manifest={manifest_path}")
+        print(f"envs={','.join(selected_envs)}")
+        print(f"backend={backend}")
+        print(f"host_local_path_deps={int(args.host_local_path_deps)}")
+        print(f"lima_instance={args.lima_instance}")
+        print(f"output={output_path}")
+        print(f"build_root={build_root}")
+        if backend == "lima":
+            ensure_lima_started(args.lima_instance)
+            guest_root, guest_recipe, guest_image = stage_guest_inputs(args.lima_instance, script_dir, build_root)
+            print(f"guest_root={guest_root}")
+            try:
+                run_guest_command(args.lima_instance, ["rm", "-f", guest_image])
+                run_guest_command(args.lima_instance, ["sudo", "apptainer", "build", guest_image, guest_recipe])
+                run_guest_command(args.lima_instance, ["apptainer", "test", guest_image])
+                if output_path.exists():
+                    output_path.unlink()
+                copy_from_guest(args.lima_instance, guest_image, output_path)
+            finally:
+                if not args.keep_guest_dir:
+                    cleaned = subprocess.run(
+                        ["limactl", "shell", args.lima_instance, "rm", "-rf", guest_root],
+                        check=False,
+                    )
+                    if cleaned.returncode != 0:
+                        print(f"warning: failed to remove guest build dir {guest_root}", file=sys.stderr)
+        else:
+            build_local_image(script_dir, build_root, output_path)
+    finally:
+        if backend == "lima":
+            stopped = subprocess.run(["limactl", "stop", args.lima_instance], check=False)
+            if stopped.returncode != 0:
+                print(f"warning: failed to stop lima instance {args.lima_instance}", file=sys.stderr)
+        if tmpdir_obj is not None:
+            tmpdir_obj.cleanup()
     return 0
 
 
