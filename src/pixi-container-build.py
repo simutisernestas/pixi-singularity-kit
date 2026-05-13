@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import re
@@ -32,6 +33,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from pathlib import Path
 import shlex
 import tomllib
@@ -50,6 +52,10 @@ EXCLUDED_NAMES = {
     "node_modules",
 }
 EXCLUDED_PATTERNS = ["*.img", "*.pyc", "*.pyo", "*.sif", "*.sqsh"]
+CACHE_DIR_NAME = "pixi-container-kit"
+BASE_TEMPLATE_NAME = "pixi-container-base.def"
+ENV_TEMPLATE_NAME = "pixi-container-env.def"
+PIXI_CACHE_BIND_TARGET = "/mnt/pixi-cache"
 
 
 def parse_args() -> argparse.Namespace:
@@ -321,8 +327,23 @@ def ensure_limactl_available() -> None:
         raise SystemExit("could not find `limactl` in PATH")
 
 
-def run_host_command(command: list[str]) -> None:
-    subprocess.run(command, check=True)
+def run_host_command(
+    command: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    capture_output: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    command_env = None
+    if env:
+        command_env = os.environ.copy()
+        command_env.update({key: str(value) for key, value in env.items()})
+    return subprocess.run(
+        command,
+        check=True,
+        env=command_env,
+        capture_output=capture_output,
+        text=capture_output,
+    )
 
 
 def ensure_local_apptainer_available() -> None:
@@ -330,8 +351,22 @@ def ensure_local_apptainer_available() -> None:
         raise SystemExit("could not find `apptainer` in PATH for local backend")
 
 
-def run_guest_command(instance: str, command: list[str]) -> None:
-    subprocess.run(["limactl", "shell", instance, *command], check=True)
+def run_guest_command(
+    instance: str,
+    command: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    capture_output: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    guest_command = command
+    if env:
+        guest_command = ["env", *[f"{key}={value}" for key, value in env.items()], *command]
+    return subprocess.run(
+        ["limactl", "shell", instance, *guest_command],
+        check=True,
+        capture_output=capture_output,
+        text=capture_output,
+    )
 
 
 def copy_to_guest(instance: str, local_path: Path, guest_path: str) -> None:
@@ -347,6 +382,198 @@ def copy_from_guest(instance: str, guest_path: str, local_path: Path) -> None:
 
 def ensure_lima_started(instance: str) -> None:
     run_host_command(["limactl", "start", instance])
+
+
+def guest_file_exists(instance: str, path: Path) -> bool:
+    return subprocess.run(["limactl", "shell", instance, "test", "-f", str(path)], check=False).returncode == 0
+
+
+def guest_home_dir(instance: str) -> Path:
+    result = run_guest_command(instance, ["sh", "-lc", 'printf %s "$HOME"'], capture_output=True)
+    return Path(result.stdout.strip())
+
+
+def target_architecture(backend: str, lima_instance: str) -> str:
+    if backend == "lima":
+        return run_guest_command(lima_instance, ["uname", "-m"], capture_output=True).stdout.strip()
+    return os.uname().machine
+
+
+def resolve_cache_dirs(backend: str, lima_instance: str) -> dict[str, Path]:
+    if backend == "lima":
+        root = guest_home_dir(lima_instance) / ".cache" / CACHE_DIR_NAME / backend
+        run_guest_command(
+            lima_instance,
+            [
+                "mkdir",
+                "-p",
+                str(root / "apptainer"),
+                str(root / "tmp"),
+                str(root / "pixi"),
+                str(root / "stages" / "base"),
+                str(root / "stages" / "env"),
+                str(root / "meta"),
+            ],
+        )
+    else:
+        root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / CACHE_DIR_NAME / backend
+        for path in [
+            root / "apptainer",
+            root / "tmp",
+            root / "pixi",
+            root / "stages" / "base",
+            root / "stages" / "env",
+            root / "meta",
+        ]:
+            path.mkdir(parents=True, exist_ok=True)
+    return {
+        "root": root,
+        "apptainer": root / "apptainer",
+        "tmp": root / "tmp",
+        "pixi": root / "pixi",
+        "base": root / "stages" / "base",
+        "env": root / "stages" / "env",
+        "meta": root / "meta",
+    }
+
+
+def sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def hash_tree(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root).as_posix().encode("utf-8")
+        if path.is_symlink():
+            digest.update(b"L\0")
+            digest.update(rel)
+            digest.update(b"\0")
+            digest.update(os.readlink(path).encode("utf-8"))
+            digest.update(b"\0")
+            continue
+        if path.is_dir():
+            digest.update(b"D\0")
+            digest.update(rel)
+            digest.update(b"\0")
+            continue
+        digest.update(b"F\0")
+        digest.update(rel)
+        digest.update(b"\0")
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def compute_cache_key(payload: dict[str, object]) -> str:
+    return sha256_bytes(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+
+
+def stage_metadata_payload(key: str, extra: dict[str, object]) -> str:
+    payload = {
+        "key": key,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        **extra,
+    }
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
+def write_guest_text_file(instance: str, guest_path: Path, content: str) -> None:
+    with tempfile.TemporaryDirectory(prefix="pixi-container-meta-") as tmpdir:
+        local_path = Path(tmpdir) / guest_path.name
+        local_path.write_text(content, encoding="utf-8")
+        copy_to_guest(instance, local_path, str(guest_path))
+
+
+def build_base_key(script_dir: Path, arch: str) -> tuple[str, dict[str, object]]:
+    template_path = script_dir / BASE_TEMPLATE_NAME
+    inputs = {
+        "arch": arch,
+        "template": BASE_TEMPLATE_NAME,
+        "template_sha256": sha256_bytes(template_path.read_bytes()),
+    }
+    return compute_cache_key(inputs), inputs
+
+
+def build_env_key(script_dir: Path, arch: str, base_key: str, bundle_hash: str) -> tuple[str, dict[str, object]]:
+    template_path = script_dir / ENV_TEMPLATE_NAME
+    inputs = {
+        "arch": arch,
+        "base_key": base_key,
+        "bundle_sha256": bundle_hash,
+        "pixi_cache_bind_target": PIXI_CACHE_BIND_TARGET,
+        "template": ENV_TEMPLATE_NAME,
+        "template_sha256": sha256_bytes(template_path.read_bytes()),
+    }
+    return compute_cache_key(inputs), inputs
+
+
+def build_apptainer_env(cache_dirs: dict[str, Path]) -> dict[str, str]:
+    return {
+        "APPTAINER_CACHEDIR": str(cache_dirs["apptainer"]),
+        "APPTAINER_TMPDIR": str(cache_dirs["tmp"]),
+    }
+
+
+def render_definition(template_path: Path, replacements: dict[str, str], output_path: Path) -> None:
+    content = template_path.read_text(encoding="utf-8")
+    for needle, replacement in replacements.items():
+        content = content.replace(needle, replacement)
+    output_path.write_text(content, encoding="utf-8")
+
+
+def apptainer_build_command(output_path: Path, recipe_path: Path, binds: list[str]) -> list[str]:
+    command = ["apptainer", "build"]
+    for bind in binds:
+        command.extend(["--bind", bind])
+    command.extend([str(output_path), str(recipe_path)])
+    return command
+
+
+def build_local_stage(output_path: Path, recipe_path: Path, cache_dirs: dict[str, Path], binds: list[str] | None = None) -> None:
+    if output_path.exists():
+        output_path.unlink()
+    run_host_command(
+        apptainer_build_command(output_path, recipe_path, binds or []),
+        env=build_apptainer_env(cache_dirs),
+    )
+
+
+def build_guest_stage(
+    instance: str,
+    output_path: Path,
+    recipe_path: Path,
+    cache_dirs: dict[str, Path],
+    binds: list[str] | None = None,
+) -> None:
+    run_guest_command(instance, ["rm", "-f", str(output_path)])
+    run_guest_command(
+        instance,
+        ["sudo", "-E", *apptainer_build_command(output_path, recipe_path, binds or [])],
+        env=build_apptainer_env(cache_dirs),
+    )
+
+
+def test_local_image(image_path: Path) -> None:
+    run_host_command(["apptainer", "test", str(image_path)])
+
+
+def test_guest_image(instance: str, image_path: Path) -> None:
+    run_guest_command(instance, ["apptainer", "test", str(image_path)])
+
+
+def copy_cached_image(source_path: Path, output_path: Path) -> None:
+    if source_path.resolve() == output_path.resolve():
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        output_path.unlink()
+    shutil.copy2(source_path, output_path)
 
 
 def detect_backend(name: str) -> str:
@@ -394,7 +621,7 @@ def stage_bundle(
     selected_envs: list[str],
     output_bundle: Path,
     host_local_path_deps: bool,
-) -> None:
+) -> str:
     workspace_root = manifest_path.parent.resolve()
     local_roots = collect_local_path_roots(manifest_path, skip_workspace_root=mode == "package-dev")
     host_local_paths = [os.path.relpath(path, workspace_root) for path in local_roots] if host_local_path_deps else []
@@ -444,55 +671,12 @@ def stage_bundle(
             "\n".join(host_local_paths) + ("\n" if host_local_paths else ""),
             encoding="utf-8",
         )
+        bundle_hash = hash_tree(staging_root)
 
         output_bundle.parent.mkdir(parents=True, exist_ok=True)
         with tarfile.open(output_bundle, "w:gz") as archive:
             archive.add(staging_root, arcname="")
-
-
-def render_definition(template_path: Path, bundle_path: Path, runscript_path: Path, validator_path: Path, output_path: Path) -> None:
-    content = template_path.read_text(encoding="utf-8")
-    content = content.replace("__BUNDLE_TAR__", str(bundle_path))
-    content = content.replace("__RUNSCRIPT__", str(runscript_path))
-    content = content.replace("__VALIDATOR__", str(validator_path))
-    output_path.write_text(content, encoding="utf-8")
-
-
-def stage_guest_inputs(instance: str, script_dir: Path, build_root: Path) -> tuple[str, str, str]:
-    guest_root = f"/tmp/pixi-container-build-{uuid4().hex[:12]}"
-    guest_bundle = f"{guest_root}/pixi-bundle.tar.gz"
-    guest_runscript = f"{guest_root}/run_pixi_container.sh"
-    guest_validator = f"{guest_root}/validate_pixi_container.sh"
-    guest_recipe = f"{guest_root}/pixi-container.def"
-    local_recipe = build_root / "pixi-container.def"
-
-    run_guest_command(instance, ["rm", "-rf", guest_root])
-    run_guest_command(instance, ["mkdir", "-p", guest_root])
-    copy_to_guest(instance, build_root / "pixi-bundle.tar.gz", guest_bundle)
-    copy_to_guest(instance, script_dir / "run_pixi_container.sh", guest_runscript)
-    copy_to_guest(instance, script_dir / "validate_pixi_container.sh", guest_validator)
-    render_definition(
-        script_dir / "pixi-container.def",
-        Path(guest_bundle),
-        Path(guest_runscript),
-        Path(guest_validator),
-        local_recipe,
-    )
-    copy_to_guest(instance, local_recipe, guest_recipe)
-    return guest_root, guest_recipe, f"{guest_root}/image.sif"
-
-
-def build_local_image(script_dir: Path, build_root: Path, output_path: Path) -> None:
-    recipe_path = build_root / "pixi-container.def"
-    render_definition(
-        script_dir / "pixi-container.def",
-        build_root / "pixi-bundle.tar.gz",
-        script_dir / "run_pixi_container.sh",
-        script_dir / "validate_pixi_container.sh",
-        recipe_path,
-    )
-    run_host_command(["apptainer", "build", str(output_path), str(recipe_path)])
-    run_host_command(["apptainer", "test", str(output_path)])
+    return bundle_hash
 
 
 def main() -> int:
@@ -522,6 +706,7 @@ def main() -> int:
     backend = detect_backend(args.backend)
     if backend == "lima":
         ensure_limactl_available()
+        ensure_lima_started(args.lima_instance)
     else:
         ensure_local_apptainer_available()
 
@@ -534,7 +719,9 @@ def main() -> int:
 
     try:
         manifest_copy = build_manifest_copy(mode, manifest_path, build_root, args.host_local_path_deps)
-        stage_bundle(
+        cache_dirs = resolve_cache_dirs(backend, args.lima_instance)
+        arch = target_architecture(backend, args.lima_instance)
+        bundle_hash = stage_bundle(
             mode,
             manifest_path,
             manifest_copy,
@@ -542,6 +729,10 @@ def main() -> int:
             build_root / "pixi-bundle.tar.gz",
             args.host_local_path_deps,
         )
+        base_key, base_inputs = build_base_key(script_dir, arch)
+        env_key, env_inputs = build_env_key(script_dir, arch, base_key, bundle_hash)
+        base_stage_path = cache_dirs["base"] / f"{base_key}.sif"
+        env_stage_path = cache_dirs["env"] / f"{env_key}.sif"
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -549,31 +740,122 @@ def main() -> int:
         print(f"manifest={manifest_path}")
         print(f"envs={','.join(selected_envs)}")
         print(f"backend={backend}")
+        print(f"arch={arch}")
         print(f"host_local_path_deps={int(args.host_local_path_deps)}")
         print(f"lima_instance={args.lima_instance}")
         print(f"output={output_path}")
         print(f"build_root={build_root}")
+        print(f"cache_root={cache_dirs['root']}")
+        print(f"bundle_hash={bundle_hash[:12]}")
+        print(f"base_key={base_key[:12]}")
+        print(f"env_key={env_key[:12]}")
         if backend == "lima":
-            ensure_lima_started(args.lima_instance)
-            guest_root, guest_recipe, guest_image = stage_guest_inputs(args.lima_instance, script_dir, build_root)
+            guest_root = Path(f"/tmp/pixi-container-build-{uuid4().hex[:12]}")
+            guest_bundle = guest_root / "pixi-bundle.tar.gz"
+            guest_runscript = guest_root / "run_pixi_container.sh"
+            guest_validator = guest_root / "validate_pixi_container.sh"
+            guest_base_recipe = guest_root / BASE_TEMPLATE_NAME
+            guest_env_recipe = guest_root / ENV_TEMPLATE_NAME
+            local_base_recipe = build_root / BASE_TEMPLATE_NAME
+            local_env_recipe = build_root / ENV_TEMPLATE_NAME
+
+            run_guest_command(args.lima_instance, ["rm", "-rf", str(guest_root)])
+            run_guest_command(args.lima_instance, ["mkdir", "-p", str(guest_root)])
+            copy_to_guest(args.lima_instance, build_root / "pixi-bundle.tar.gz", str(guest_bundle))
+            copy_to_guest(args.lima_instance, script_dir / "run_pixi_container.sh", str(guest_runscript))
+            copy_to_guest(args.lima_instance, script_dir / "validate_pixi_container.sh", str(guest_validator))
+            render_definition(script_dir / BASE_TEMPLATE_NAME, {}, local_base_recipe)
+            render_definition(
+                script_dir / ENV_TEMPLATE_NAME,
+                {
+                    "__BASE_IMAGE__": str(base_stage_path),
+                    "__BUNDLE_TAR__": str(guest_bundle),
+                    "__RUNSCRIPT__": str(guest_runscript),
+                    "__VALIDATOR__": str(guest_validator),
+                },
+                local_env_recipe,
+            )
+            copy_to_guest(args.lima_instance, local_base_recipe, str(guest_base_recipe))
+            copy_to_guest(args.lima_instance, local_env_recipe, str(guest_env_recipe))
             print(f"guest_root={guest_root}")
             try:
-                run_guest_command(args.lima_instance, ["rm", "-f", guest_image])
-                run_guest_command(args.lima_instance, ["sudo", "apptainer", "build", guest_image, guest_recipe])
-                run_guest_command(args.lima_instance, ["apptainer", "test", guest_image])
+                base_hit = guest_file_exists(args.lima_instance, base_stage_path)
+                env_hit = guest_file_exists(args.lima_instance, env_stage_path)
+                print(f"base_cache={'hit' if base_hit else 'miss'}")
+                print(f"base_stage={base_stage_path}")
+                print(f"env_cache={'hit' if env_hit else 'miss'}")
+                print(f"env_stage={env_stage_path}")
+                if not base_hit:
+                    build_guest_stage(args.lima_instance, base_stage_path, guest_base_recipe, cache_dirs)
+                    write_guest_text_file(
+                        args.lima_instance,
+                        base_stage_path.with_suffix(".json"),
+                        stage_metadata_payload(base_key, {**base_inputs, "stage": "base"}),
+                    )
+                if not env_hit:
+                    build_guest_stage(
+                        args.lima_instance,
+                        env_stage_path,
+                        guest_env_recipe,
+                        cache_dirs,
+                        [f"{cache_dirs['pixi']}:{PIXI_CACHE_BIND_TARGET}"],
+                    )
+                    write_guest_text_file(
+                        args.lima_instance,
+                        env_stage_path.with_suffix(".json"),
+                        stage_metadata_payload(env_key, {**env_inputs, "stage": "env"}),
+                    )
+                test_guest_image(args.lima_instance, env_stage_path)
                 if output_path.exists():
                     output_path.unlink()
-                copy_from_guest(args.lima_instance, guest_image, output_path)
+                copy_from_guest(args.lima_instance, str(env_stage_path), output_path)
             finally:
                 if not args.keep_guest_dir:
                     cleaned = subprocess.run(
-                        ["limactl", "shell", args.lima_instance, "rm", "-rf", guest_root],
+                        ["limactl", "shell", args.lima_instance, "rm", "-rf", str(guest_root)],
                         check=False,
                     )
                     if cleaned.returncode != 0:
                         print(f"warning: failed to remove guest build dir {guest_root}", file=sys.stderr)
         else:
-            build_local_image(script_dir, build_root, output_path)
+            base_recipe_path = build_root / BASE_TEMPLATE_NAME
+            env_recipe_path = build_root / ENV_TEMPLATE_NAME
+            render_definition(script_dir / BASE_TEMPLATE_NAME, {}, base_recipe_path)
+            render_definition(
+                script_dir / ENV_TEMPLATE_NAME,
+                {
+                    "__BASE_IMAGE__": str(base_stage_path),
+                    "__BUNDLE_TAR__": str(build_root / "pixi-bundle.tar.gz"),
+                    "__RUNSCRIPT__": str(script_dir / "run_pixi_container.sh"),
+                    "__VALIDATOR__": str(script_dir / "validate_pixi_container.sh"),
+                },
+                env_recipe_path,
+            )
+            base_hit = base_stage_path.exists()
+            env_hit = env_stage_path.exists()
+            print(f"base_cache={'hit' if base_hit else 'miss'}")
+            print(f"base_stage={base_stage_path}")
+            print(f"env_cache={'hit' if env_hit else 'miss'}")
+            print(f"env_stage={env_stage_path}")
+            if not base_hit:
+                build_local_stage(base_stage_path, base_recipe_path, cache_dirs)
+                base_stage_path.with_suffix(".json").write_text(
+                    stage_metadata_payload(base_key, {**base_inputs, "stage": "base"}),
+                    encoding="utf-8",
+                )
+            if not env_hit:
+                build_local_stage(
+                    env_stage_path,
+                    env_recipe_path,
+                    cache_dirs,
+                    [f"{cache_dirs['pixi']}:{PIXI_CACHE_BIND_TARGET}"],
+                )
+                env_stage_path.with_suffix(".json").write_text(
+                    stage_metadata_payload(env_key, {**env_inputs, "stage": "env"}),
+                    encoding="utf-8",
+                )
+            test_local_image(env_stage_path)
+            copy_cached_image(env_stage_path, output_path)
     finally:
         if backend == "lima":
             stopped = subprocess.run(["limactl", "stop", args.lima_instance], check=False)

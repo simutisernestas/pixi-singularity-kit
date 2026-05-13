@@ -9,7 +9,8 @@ Files:
 
 - `src/bin/pixi-container-build` - executable host-side build command for `PATH`
 - `src/pixi-container-build.py` - implementation resolved by `src/bin/pixi-container-build`
-- `src/pixi-container.def` - generic Apptainer recipe template
+- `src/pixi-container-base.def` - cached Apptainer base stage template
+- `src/pixi-container-env.def` - cached Apptainer env stage template
 - `src/run_pixi_container.sh` - runtime wrapper inside image
 - `src/validate_pixi_container.sh` - image self-test
 - `install.sh` - installs kit usage files into `/opt/pixi-singularity-kit`
@@ -100,4 +101,6 @@ Notes:
 - host-local path deps still rely on host source at runtime; compiled extensions and console scripts come from baked install, not live host source
 - builder uses `limactl start`, `limactl copy`, `limactl shell`, guest-local `/tmp` build paths, and `limactl stop` on macOS by default
 - builder can use local `apptainer` directly with `--backend local`, which is how CI smoke tests run
+- builder keeps reusable caches under `~/.cache/pixi-container-kit/<backend>/` for Apptainer downloads, Pixi downloads, and cached base/env stage SIFs
+- base stage rebuilds when `src/pixi-container-base.def` changes or target architecture changes; env stage rebuilds when staged manifest inputs, selected envs, base key, or `src/pixi-container-env.def` change
 - sample fixtures live in `test/package/` and `test/experiment/`

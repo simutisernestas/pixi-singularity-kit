@@ -1,0 +1,30 @@
+Bootstrap: docker
+From: ubuntu:24.04
+
+%labels
+    Author ernie
+    Description reusable pixi-backed Apptainer base image with apt packages and Pixi installed
+
+%environment
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+    export PYTHONUNBUFFERED=1
+    export PIXI_HOME=/opt/pixi
+    export PATH=/usr/local/bin:$PATH
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    export PIXI_HOME=/opt/pixi
+
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        curl \
+        tar
+    rm -rf /var/lib/apt/lists/*
+
+    curl -fsSL https://pixi.sh/install.sh | PIXI_HOME=/opt/pixi PIXI_BIN_DIR=/usr/local/bin PIXI_NO_PATH_UPDATE=1 bash
+
+    mkdir -p /mnt/pixi-cache

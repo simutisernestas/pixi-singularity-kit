@@ -8,7 +8,8 @@ set -euo pipefail
 # What it installs:
 #   - bin/pixi-container-build
 #   - pixi-container-build.py
-#   - pixi-container.def
+#   - pixi-container-base.def
+#   - pixi-container-env.def
 #   - run_pixi_container.sh
 #   - validate_pixi_container.sh
 #   - README.md
@@ -28,7 +29,8 @@ mkdir -p "$target_root/bin"
 
 install -m 0755 "$source_dir/bin/pixi-container-build" "$target_root/bin/pixi-container-build"
 install -m 0755 "$source_dir/pixi-container-build.py" "$target_root/pixi-container-build.py"
-install -m 0644 "$source_dir/pixi-container.def" "$target_root/pixi-container.def"
+install -m 0644 "$source_dir/pixi-container-base.def" "$target_root/pixi-container-base.def"
+install -m 0644 "$source_dir/pixi-container-env.def" "$target_root/pixi-container-env.def"
 install -m 0755 "$source_dir/run_pixi_container.sh" "$target_root/run_pixi_container.sh"
 install -m 0755 "$source_dir/validate_pixi_container.sh" "$target_root/validate_pixi_container.sh"
 install -m 0644 "$script_dir/README.md" "$target_root/README.md"
