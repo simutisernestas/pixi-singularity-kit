@@ -75,6 +75,7 @@ pixi-container-build --backend local
 pixi-container-build --env default --env format
 pixi-container-build --mode pixi-project --output /tmp/my-job.sif
 pixi-container-build --mode pixi-project --host-local-path-deps --output /tmp/my-job.sif
+pixi-container-build --rebuild-cache --mode pixi-project --output /tmp/my-job.sif
 ```
 
 Runtime examples:
@@ -102,5 +103,6 @@ Notes:
 - builder uses `limactl start`, `limactl copy`, `limactl shell`, guest-local `/tmp` build paths, and `limactl stop` on macOS by default
 - builder can use local `apptainer` directly with `--backend local`, which is how CI smoke tests run
 - builder keeps reusable caches under `~/.cache/pixi-container-kit/<backend>/` for Apptainer downloads, Pixi downloads, and cached base/env stage SIFs
+- `--rebuild-cache` removes whole builder-managed cache root for chosen backend before rebuilding, including Apptainer, Pixi, and cached stage artifacts
 - base stage rebuilds when `src/pixi-container-base.def` changes or target architecture changes; env stage rebuilds when staged manifest inputs, selected envs, base key, or `src/pixi-container-env.def` change
 - sample fixtures live in `test/package/` and `test/experiment/`

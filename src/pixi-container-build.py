@@ -109,6 +109,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not bake local path pypi-dependencies; load them from the host at runtime via PYTHONPATH.",
     )
+    parser.add_argument(
+        "--rebuild-cache",
+        action="store_true",
+        help="Remove builder-managed cache for selected backend before building.",
+    )
     return parser.parse_args()
 
 
@@ -437,6 +442,16 @@ def resolve_cache_dirs(backend: str, lima_instance: str) -> dict[str, Path]:
     }
 
 
+def reset_cache_root(backend: str, lima_instance: str) -> Path:
+    if backend == "lima":
+        root = guest_home_dir(lima_instance) / ".cache" / CACHE_DIR_NAME / backend
+        run_guest_command(lima_instance, ["sudo", "rm", "-rf", str(root)])
+        return root
+    root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / CACHE_DIR_NAME / backend
+    shutil.rmtree(root, ignore_errors=True)
+    return root
+
+
 def sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
@@ -719,6 +734,8 @@ def main() -> int:
 
     try:
         manifest_copy = build_manifest_copy(mode, manifest_path, build_root, args.host_local_path_deps)
+        if args.rebuild_cache:
+            reset_cache_root(backend, args.lima_instance)
         cache_dirs = resolve_cache_dirs(backend, args.lima_instance)
         arch = target_architecture(backend, args.lima_instance)
         bundle_hash = stage_bundle(
@@ -746,6 +763,7 @@ def main() -> int:
         print(f"output={output_path}")
         print(f"build_root={build_root}")
         print(f"cache_root={cache_dirs['root']}")
+        print(f"rebuild_cache={int(args.rebuild_cache)}")
         print(f"bundle_hash={bundle_hash[:12]}")
         print(f"base_key={base_key[:12]}")
         print(f"env_key={env_key[:12]}")
